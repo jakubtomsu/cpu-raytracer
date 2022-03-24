@@ -264,8 +264,13 @@ static inline float randf32() {
 	return (float)rand()/(float)(RAND_MAX);
 }
 
+static inline vec3 Ray_CalcSkyColor(const vec3 d) {
+	const float dt = d.y*.5 + .5;
+	return (vec3){.1+dt*.5, .2+dt*.7, .1+dt*.9};
+}
+
 void RenderScene(RT_Context* ctx) {
-	const vec3 pos = (vec3){0.5, 0, -1};
+	const vec3 pos = (vec3){0.5, 0, -2};
 	const vec3 ro = pos;
 	for(int x = 0; x < ctx->resolution_x; x++) {
 		for(int y = 0; y < ctx->resolution_y; y++) {
@@ -281,29 +286,33 @@ void RenderScene(RT_Context* ctx) {
 			
 			vec3 col = {0};
 			Ray_Result prim = Ray_IntersectScene(ro, rd, ctx);
-			const vec3 prim_hitpoint = vec3_add(vec3_add(ro, vec3_mul_f(rd, prim.t)), vec3_mul_f(prim.normal, 0.0001f));
-			col = prim.col;
-			float rotMat[2][2] = {{prim.normal.y, -prim.normal.x}, {prim.normal.x, prim.normal.y}}; // compute a rotation matrix 
+			if(prim.is_valid_hit) {
+				const vec3 prim_hitpoint = vec3_add(vec3_add(ro, vec3_mul_f(rd, prim.t)), vec3_mul_f(prim.normal, 0.0001f));
+				col = prim.col;
 			
-			// GI
-			const int gi_num = 4;
-			for(int i = 0; i < gi_num; i++) {
-				vec3 d = vec3_normalize((vec3){
-					randf32(),
-					randf32(),
-					randf32(),
-				});
-				d = vec3_reflect(d, prim.normal);
-				Ray_Result gi = Ray_IntersectScene(prim_hitpoint, d, ctx);
-				vec3 gicol = {0};
-				if(gi.is_valid_hit) {
-					gicol = gi.col;
-				} else {
-					
+				// GI
+				const int gi_num = 4;
+				for(int i = 0; i < gi_num; i++) {
+					vec3 d = vec3_normalize(vec3_add((vec3){
+						randf32(),
+						randf32(),
+						randf32(),
+					},
+					);
+					d = vec3_reflect(d, prim.normal);
+					Ray_Result gi = Ray_IntersectScene(prim_hitpoint, d, ctx);
+					vec3 gicol = {0};
+					if(gi.is_valid_hit) {
+						gicol = gi.col;
+					} else {
+						gicol = Ray_CalcSkyColor(d);
+					}
+					col = vec3_add(col, gicol);
 				}
-				col = vec3_add(col, vec3_div_f(gicol, gi_num + 1));
+				col = vec3_div_f(col, gi_num + 1);
+			} else {
+				col = Ray_CalcSkyColor(rd);
 			}
-			col = vec3_mul_f(col, .5);
 			
 			// gamma correction
 			col = (vec3){
