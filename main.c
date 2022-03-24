@@ -63,6 +63,10 @@ static inline vec2 Ray_IntersectSphere(const vec3 ro, const vec3 rd, const vec3 
 	return (vec2){-b-h, -b+h};
 }
 
+static inline vec3 Ray_SphereNormal(const vec3 hit, const vec3 sph_center) {
+	return vec3_normalize(vec3_sub(hit, sph_center));
+}
+
 static inline vec3 vec3_sign(const vec3 v) {
 	return (vec3){
 		v.x >= 0.0f ? 1.0f : -1.0f,
@@ -176,6 +180,24 @@ static inline vec3 Ray_GousatNormal(const vec3 pos, const float ka, const float 
 }
 
 
+typedef unsigned char RT_ShapeKind;
+#define RT_SHAPEKIND_SPHERE 0
+#define RT_SHAPEKIND_BOX 1
+
+typedef struct {vec3 pos; float rad;} RT_Shape_Sphere;
+typedef struct {vec3 pos; vec3 size;} RT_Shape_Box;
+
+typedef struct RT_Shape {
+	union {
+		RT_Shape_Sphere sphere;
+		RT_Shape_Box box;
+	};
+	vec3 col;
+	RT_ShapeKind kind;
+} RT_Shape;
+
+static RT_Shape SceneShapes[1024] = {0};
+static int SceneShapes_num = 0;
 
 typedef struct Ray_Result {
 	vec3 normal;
@@ -186,22 +208,47 @@ typedef struct Ray_Result {
 
 Ray_Result Ray_IntersectScene(const vec3 ro, const vec3 rd, RT_Context* ctx) {
 	Ray_Result result = {0};
+	result.t = 1e10f;
 
+	/*
 	vec2 nf = {0};
 	float t = 0;
-	// const vec2 nf = Ray_IntersectSphere(ro, rd, (vec3){0, 0, 10}, 4.0f);
-	//nf = Ray_IntersectBox(vec3_sub(ro, (vec3){-1, -1.5, 3}), rd, (vec3){3, 1, 2}, &result.normal);
 	const vec3 center = (vec3){-1, 1, -4000};
-	t = Ray_GoursatIntersect(vec3_sub(ro, center), rd, 1.0f, 1.0f);
-	const vec3 hitpos = vec3_add(ro, vec3_mul_f(rd, t));
-	result.normal = Ray_GousatNormal(hitpos, 1.0f, 1.0f);
+	// const vec2 nf = Ray_IntersectSphere(ro, rd, (vec3){0, 0, 10}, 4.0f);
+	nf = Ray_IntersectBox(vec3_sub(ro, (vec3){-1, -1.5, 3}), rd, (vec3){3, 1, 2}, &result.normal);
+	//t = Ray_GoursatIntersect(vec3_sub(ro, center), rd, 1.0f, 1.0f);
+	//const vec3 hitpos = vec3_add(ro, vec3_mul_f(rd, t));
+	//result.normal = Ray_GousatNormal(hitpos, 1.0f, 1.0f);
 	
 
-	// if(NearFar_Hit(nf)) { t = nf.x
-	if(t > 0) {
+	if(NearFar_Hit(nf)) { t = nf.x;
+	//if(t > 0) {
 		result.is_valid_hit = 1;
 		result.t = t;
 		result.col = vec3_init_f(t * 0.02f);
+	}
+	*/
+	
+	for(int i = 0; i < SceneShapes_num; i++) {
+		vec2 nf;
+		RT_Shape shape = SceneShapes[i];
+		vec3 normal = {0};
+		switch(shape.kind) {
+			case RT_SHAPEKIND_SPHERE: {
+				nf = Ray_IntersectSphere(ro, rd, shape.sphere.pos, shape.sphere.rad);
+				normal = Ray_SphereNormal(vec3_add(ro, vec3_mul_f(rd, nf.x)), shape.sphere.pos);
+			} break;
+			case RT_SHAPEKIND_BOX: {
+				nf = Ray_IntersectBox(vec3_sub(ro, shape.box.pos), rd, shape.box.size, &normal);
+			} break;
+		}
+	
+		if(NearFar_Hit(nf) && nf.x < result.t) {
+			result.is_valid_hit = 1;
+			result.t = nf.x;
+			result.normal = normal;
+			result.col = shape.col;
+		}
 	}
 
 	return result;
@@ -214,6 +261,7 @@ static inline vec3 dir_to_color(const vec3 dir) {
 }
 
 void RenderScene(RT_Context* ctx) {
+	const vec3 ro = (vec3){0.5, 0, -1};
 	for(int x = 0; x < ctx->resolution_x; x++) {
 		for(int y = 0; y < ctx->resolution_y; y++) {
 			vec2 uv = (vec2){
@@ -227,9 +275,10 @@ void RenderScene(RT_Context* ctx) {
 			//printf("%f %f %f\n", rd.x, rd.y, rd.z);
 			
 			vec3 col = {0};
-			Ray_Result rr = Ray_IntersectScene((vec3){0}, rd, ctx);
+			Ray_Result rr = Ray_IntersectScene(ro, rd, ctx);
 			col = rr.col;
-			col = dir_to_color(rr.normal);
+			//col = dir_to_color(rr.normal);
+			col = vec3_mul_f(col, 1 + .5*vec3_dot(rr.normal, (vec3){1,1,0}));
 			
 			// gamma correction
 			col = (vec3){
@@ -255,6 +304,28 @@ int main() {
 	ctx.aspect_y = (float)ctx.resolution_y / (float)ctx.resolution_x;
 	ctx.fov_rad = f32_to_deg(ctx.fov);
 	ctx.out_image_data = (rgb8*)malloc(ctx.resolution_x * ctx.resolution_y * sizeof(rgb8));
+	
+	
+	// init scene
+	{
+		SceneShapes[0].kind = RT_SHAPEKIND_BOX;
+		SceneShapes[0].box = (RT_Shape_Box){(vec3){ 0, 2, 1}, (vec3){3,1,2}};
+		SceneShapes[0].col = (vec3){1,1,1};
+		SceneShapes[1].kind = RT_SHAPEKIND_BOX;
+		SceneShapes[1].box = (RT_Shape_Box){(vec3){ 0,-2, 1}, (vec3){3,1,2}};
+		SceneShapes[1].col = (vec3){1,1,1};
+		SceneShapes[2].kind = RT_SHAPEKIND_BOX;
+		SceneShapes[2].box = (RT_Shape_Box){(vec3){ 0, 0, 2}, (vec3){1,1,1}};
+		SceneShapes[2].col = (vec3){1,1,1};
+		SceneShapes[3].kind = RT_SHAPEKIND_BOX;
+		SceneShapes[3].box = (RT_Shape_Box){(vec3){-2, 0, 0}, (vec3){1,1,1}};
+		SceneShapes[3].col = (vec3){0,1,0};
+		SceneShapes[4].kind = RT_SHAPEKIND_BOX;
+		SceneShapes[4].box = (RT_Shape_Box){(vec3){ 2, 0, 0}, (vec3){1,1,1}};
+		SceneShapes[4].col = (vec3){1,0,0};
+		
+		SceneShapes_num = 5;
+	}
 	
 	RenderScene(&ctx);
 	
