@@ -260,8 +260,13 @@ static inline vec3 dir_to_color(const vec3 dir) {
 	return vec3_mul_f(vec3_add(dir, vec3_init_f(1.0f)), 0.5f);
 }
 
+static inline float randf32() {
+	return (float)rand()/(float)(RAND_MAX);
+}
+
 void RenderScene(RT_Context* ctx) {
-	const vec3 ro = (vec3){0.5, 0, -1};
+	const vec3 pos = (vec3){0.5, 0, -1};
+	const vec3 ro = pos;
 	for(int x = 0; x < ctx->resolution_x; x++) {
 		for(int y = 0; y < ctx->resolution_y; y++) {
 			vec2 uv = (vec2){
@@ -275,10 +280,30 @@ void RenderScene(RT_Context* ctx) {
 			//printf("%f %f %f\n", rd.x, rd.y, rd.z);
 			
 			vec3 col = {0};
-			Ray_Result rr = Ray_IntersectScene(ro, rd, ctx);
-			col = rr.col;
-			//col = dir_to_color(rr.normal);
-			col = vec3_mul_f(col, 1 + .5*vec3_dot(rr.normal, (vec3){1,1,0}));
+			Ray_Result prim = Ray_IntersectScene(ro, rd, ctx);
+			const vec3 prim_hitpoint = vec3_add(vec3_add(ro, vec3_mul_f(rd, prim.t)), vec3_mul_f(prim.normal, 0.0001f));
+			col = prim.col;
+			float rotMat[2][2] = {{prim.normal.y, -prim.normal.x}, {prim.normal.x, prim.normal.y}}; // compute a rotation matrix 
+			
+			// GI
+			const int gi_num = 4;
+			for(int i = 0; i < gi_num; i++) {
+				vec3 d = vec3_normalize((vec3){
+					randf32(),
+					randf32(),
+					randf32(),
+				});
+				d = vec3_reflect(d, prim.normal);
+				Ray_Result gi = Ray_IntersectScene(prim_hitpoint, d, ctx);
+				vec3 gicol = {0};
+				if(gi.is_valid_hit) {
+					gicol = gi.col;
+				} else {
+					
+				}
+				col = vec3_add(col, vec3_div_f(gicol, gi_num + 1));
+			}
+			col = vec3_mul_f(col, .5);
 			
 			// gamma correction
 			col = (vec3){
