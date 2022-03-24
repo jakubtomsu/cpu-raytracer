@@ -1,1 +1,1 @@
-cl /Tc unitybuild.c /Feout.exe /std:c11
+cl /Tc unitybuild.c /Feout.exe /std:c11 /O2

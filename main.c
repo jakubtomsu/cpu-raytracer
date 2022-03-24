@@ -40,14 +40,6 @@ static inline vec3 ray_pinhole_projection(vec2 uv, const RT_Context* ctx) {
 	return vec3_normalize((vec3){uv.x * fov_tan / ctx->aspect_y, uv.y * fov_tan, 1.0f});
 }
 
-static inline rgb8 vec3_to_rgb8(const vec3 v) {
-	return (rgb8){
-		(uint8_t)(v.x * 255.0f),
-		(uint8_t)(v.y * 255.0f),
-		(uint8_t)(v.z * 255.0f),
-	};
-}
-
 // also returns true when inside
 static inline bool NearFar_Hit(const vec2 t) {
 	return t.x < t.y && t.y > 0;
@@ -206,6 +198,13 @@ typedef struct Ray_Result {
 	int is_valid_hit;
 } Ray_Result;
 
+static inline vec3 Ray_CalcSkyColor(const vec3 d) {
+	const float dt = d.y*.5 + .5;
+	vec3 result = (vec3){.1+dt*.5, .2+dt*.7, .1+dt*.9};
+	result = vec3_mul_f(result, 0.5f);
+	return result;
+}
+
 Ray_Result Ray_IntersectScene(const vec3 ro, const vec3 rd, RT_Context* ctx) {
 	Ray_Result result = {0};
 	result.t = 1e10f;
@@ -243,7 +242,7 @@ Ray_Result Ray_IntersectScene(const vec3 ro, const vec3 rd, RT_Context* ctx) {
 			} break;
 		}
 	
-		if(NearFar_Hit(nf) && nf.x < result.t) {
+		if(NearFar_Hit(nf) && nf.x > -0.0001f && nf.x < result.t) {
 			result.is_valid_hit = 1;
 			result.t = nf.x;
 			result.normal = normal;
@@ -261,17 +260,28 @@ static inline vec3 dir_to_color(const vec3 dir) {
 }
 
 static inline float randf32() {
-	return (float)rand()/(float)(RAND_MAX);
+	return (((float)rand()/(float)(RAND_MAX)) - 0.5f) * 2.0f;
 }
 
-static inline vec3 Ray_CalcSkyColor(const vec3 d) {
-	const float dt = d.y*.5 + .5;
-	return (vec3){.1+dt*.5, .2+dt*.7, .1+dt*.9};
+
+static inline rgb8 vec3_to_rgb8(const vec3 v) {
+	return (rgb8){
+		(uint8_t)(f32_clamp(v.x, 1e-6f, 1.0f-1e-6f) * 255.0f),
+		(uint8_t)(f32_clamp(v.y, 1e-6f, 1.0f-1e-6f) * 255.0f),
+		(uint8_t)(f32_clamp(v.z, 1e-6f, 1.0f-1e-6f) * 255.0f),
+	};
 }
 
 void RenderScene(RT_Context* ctx) {
 	const vec3 pos = (vec3){0.5, 0, -2};
 	const vec3 ro = pos;
+
+	const vec3 sun_dir = vec3_normalize((vec3){-0.5, .5, -0.9});
+	const float sun_randomness = 0.08f;
+	const vec3 sun_col = (vec3){.4,.4,.1};
+	const int sun_sample_num = 8;
+	const vec3 sun_add_col = vec3_div_f(sun_col, sun_sample_num);
+
 	for(int x = 0; x < ctx->resolution_x; x++) {
 		for(int y = 0; y < ctx->resolution_y; y++) {
 			vec2 uv = (vec2){
@@ -287,32 +297,53 @@ void RenderScene(RT_Context* ctx) {
 			vec3 col = {0};
 			Ray_Result prim = Ray_IntersectScene(ro, rd, ctx);
 			if(prim.is_valid_hit) {
-				const vec3 prim_hitpoint = vec3_add(vec3_add(ro, vec3_mul_f(rd, prim.t)), vec3_mul_f(prim.normal, 0.0001f));
+				const int gi_num = 8;
+				const vec3 prim_hitpoint = vec3_add(vec3_add(ro, vec3_mul_f(rd, prim.t)), vec3_mul_f(prim.normal, 1e-7f));
 				col = prim.col;
-			
+
+				vec3 gi_finalcol = {0};
 				// GI
-				const int gi_num = 4;
 				for(int i = 0; i < gi_num; i++) {
-					vec3 d = vec3_normalize(vec3_add((vec3){
+					vec3 d = vec3_normalize((vec3){
 						randf32(),
 						randf32(),
 						randf32(),
-					},
-					);
-					d = vec3_reflect(d, prim.normal);
+					});
+					if(vec3_dot(d, prim.normal) < 0.0f) d = vec3_negate(d);
+
 					Ray_Result gi = Ray_IntersectScene(prim_hitpoint, d, ctx);
 					vec3 gicol = {0};
 					if(gi.is_valid_hit) {
-						gicol = gi.col;
+						gicol = vec3_mul(gi.col, Ray_CalcSkyColor(d));
 					} else {
 						gicol = Ray_CalcSkyColor(d);
 					}
-					col = vec3_add(col, gicol);
+					gi_finalcol = vec3_add(gi_finalcol, gicol);
 				}
-				col = vec3_div_f(col, gi_num + 1);
+
+				gi_finalcol = vec3_div_f(gi_finalcol, gi_num);
+				col = vec3_mul_f(vec3_add(col, gi_finalcol), 0.5f);
+				col = vec3_lerp(prim.col, gi_finalcol, 0.75f);
+				//col = gi_finalcol;
+
+				// sun light
+				const float sun_str = vec3_dot(prim.normal, sun_dir);
+				for(int i = 0; i < sun_sample_num; i++) {
+					vec3 d = vec3_normalize(vec3_add((vec3){
+						randf32() * sun_randomness,
+						randf32() * sun_randomness,
+						randf32() * sun_randomness,
+					}, sun_dir));
+					
+					Ray_Result rr = Ray_IntersectScene(prim_hitpoint, d, ctx);
+					if(!rr.is_valid_hit) {
+						col = vec3_add(col, vec3_mul_f(sun_add_col, sun_str));
+					}
+				}
 			} else {
 				col = Ray_CalcSkyColor(rd);
 			}
+			
 			
 			// gamma correction
 			col = (vec3){
@@ -343,10 +374,10 @@ int main() {
 	// init scene
 	{
 		SceneShapes[0].kind = RT_SHAPEKIND_BOX;
-		SceneShapes[0].box = (RT_Shape_Box){(vec3){ 0, 2, 1}, (vec3){3,1,2}};
+		SceneShapes[0].box = (RT_Shape_Box){(vec3){ 0, 2, 1}, (vec3){3,1,2.1}};
 		SceneShapes[0].col = (vec3){1,1,1};
 		SceneShapes[1].kind = RT_SHAPEKIND_BOX;
-		SceneShapes[1].box = (RT_Shape_Box){(vec3){ 0,-2, 1}, (vec3){3,1,2}};
+		SceneShapes[1].box = (RT_Shape_Box){(vec3){ 0,-2, 0}, (vec3){3,1,3}};
 		SceneShapes[1].col = (vec3){1,1,1};
 		SceneShapes[2].kind = RT_SHAPEKIND_BOX;
 		SceneShapes[2].box = (RT_Shape_Box){(vec3){ 0, 0, 2}, (vec3){1,1,1}};
@@ -358,13 +389,15 @@ int main() {
 		SceneShapes[4].box = (RT_Shape_Box){(vec3){ 2, 0, 0}, (vec3){1,1,1}};
 		SceneShapes[4].col = (vec3){1,0,0};
 		
-		SceneShapes_num = 5;
+		SceneShapes[5].kind = RT_SHAPEKIND_SPHERE;
+		SceneShapes[5].sphere = (RT_Shape_Sphere){(vec3){ 0, -0.6f, 0}, 0.3f};
+		SceneShapes[5].col = (vec3){0,1,1};
+		
+		SceneShapes_num = 6;
 	}
 	
 	RenderScene(&ctx);
 	
 	stbi_write_png("image.png", ctx.resolution_x, ctx.resolution_y, 3, ctx.out_image_data, sizeof(rgb8)*ctx.resolution_x);
-	
-	printf("hello world\n");
 	return 0;
 }
