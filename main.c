@@ -26,6 +26,14 @@ typedef struct RT_Context {
 	float fov; // deg
 	float fov_rad;
 	rgb8* out_image_data;
+	
+	struct {
+		vec3	dir;
+		float	randomness;
+		vec3	col;
+		int	sample_num;
+		vec3	add_col;
+	} sun;
 } RT_Context;
 
 
@@ -272,15 +280,59 @@ static inline rgb8 vec3_to_rgb8(const vec3 v) {
 	};
 }
 
+vec3 RandSphereDir() {
+	return vec3_normalize((vec3){
+		randf32(),
+		randf32(),
+		randf32(),
+	});
+}
+
+vec3 RandHemisphereDir(const vec3 normal) {
+	vec3 d = RandSphereDir();
+	if(vec3_dot(d, normal) < 0.0f) d = vec3_negate(d);
+	return d;
+}
+
+// @returns: color
+vec3 RaytraceShadowRay(vec3 p, RT_Context* ctx) {
+	vec3 d = vec3_normalize(vec3_add(vec3_mul_f(RandSphereDir(), ctx->sun.randomness), ctx->sun.dir));
+	Ray_Result rr = Ray_IntersectScene(p, d, ctx);
+	vec3 radiance = vec3_init_f(0.1);
+	if(!rr.is_valid_hit) {
+		radiance = vec3_add(radiance, ctx->sun.add_col);
+	}
+	return radiance;
+}
+
+// @returns: color
+vec3 RaytraceRecursive(vec3 ro, vec3 rd, const int max_bounces, RT_Context* ctx) {
+	vec3 col = {0};
+	float accum = 0;
+	for(int i = 0; i < max_bounces; i++) {
+		const float strength = 1.0f / (float)(i+1);
+		Ray_Result rr = Ray_IntersectScene(ro, rd, ctx);
+		accum += strength;
+		if(rr.is_valid_hit) {
+			ro = vec3_add(vec3_mul_f(rd, rr.t), vec3_mul_f(rr.normal, 1e-6f));
+			vec3 radiance = RaytraceShadowRay(ro, ctx);
+			
+			rd = RandHemisphereDir(rr.normal);
+			col = vec3_add(col, vec3_mul_f(vec3_mul(rr.col, radiance), strength));
+		} else {
+			col = vec3_add(col, vec3_mul_f(Ray_CalcSkyColor(rd), strength));
+			goto loop_end;
+		}
+	}
+	loop_end:
+	
+	col = vec3_div_f(col, accum);
+	return col;
+}
+
 void RenderScene(RT_Context* ctx) {
 	const vec3 pos = (vec3){0.5, 0, -2};
 	const vec3 ro = pos;
-
-	const vec3 sun_dir = vec3_normalize((vec3){-0.5, .5, -0.9});
-	const float sun_randomness = 0.08f;
-	const vec3 sun_col = (vec3){.4,.4,.1};
-	const int sun_sample_num = 8;
-	const vec3 sun_add_col = vec3_div_f(sun_col, sun_sample_num);
 
 	for(int x = 0; x < ctx->resolution_x; x++) {
 		for(int y = 0; y < ctx->resolution_y; y++) {
@@ -297,49 +349,42 @@ void RenderScene(RT_Context* ctx) {
 			vec3 col = {0};
 			Ray_Result prim = Ray_IntersectScene(ro, rd, ctx);
 			if(prim.is_valid_hit) {
-				const int gi_num = 8;
+				const int gi_num = 1;
 				const vec3 prim_hitpoint = vec3_add(vec3_add(ro, vec3_mul_f(rd, prim.t)), vec3_mul_f(prim.normal, 1e-7f));
 				col = prim.col;
 
-				vec3 gi_finalcol = {0};
+				
+				vec3 radiance = {0};
+				
 				// GI
+				vec3 gi_finalcol = {0};
 				for(int i = 0; i < gi_num; i++) {
-					vec3 d = vec3_normalize((vec3){
-						randf32(),
-						randf32(),
-						randf32(),
-					});
-					if(vec3_dot(d, prim.normal) < 0.0f) d = vec3_negate(d);
-
-					Ray_Result gi = Ray_IntersectScene(prim_hitpoint, d, ctx);
-					vec3 gicol = {0};
-					if(gi.is_valid_hit) {
-						gicol = vec3_mul(gi.col, Ray_CalcSkyColor(d));
-					} else {
-						gicol = Ray_CalcSkyColor(d);
-					}
-					gi_finalcol = vec3_add(gi_finalcol, gicol);
+					vec3 d = RandHemisphereDir(prim.normal);
+					gi_finalcol = RaytraceRecursive(ro, d, 1, ctx);
 				}
-
 				gi_finalcol = vec3_div_f(gi_finalcol, gi_num);
-				col = vec3_mul_f(vec3_add(col, gi_finalcol), 0.5f);
-				col = vec3_lerp(prim.col, gi_finalcol, 0.75f);
+				radiance = vec3_add(radiance, gi_finalcol);
 				//col = gi_finalcol;
 
 				// sun light
-				const float sun_str = vec3_dot(prim.normal, sun_dir);
-				for(int i = 0; i < sun_sample_num; i++) {
+				/*
+				const float sun_str = vec3_dot(prim.normal, ctx->sun.dir);
+				for(int i = 0; i < ctx->sun.sample_num; i++) {
 					vec3 d = vec3_normalize(vec3_add((vec3){
-						randf32() * sun_randomness,
-						randf32() * sun_randomness,
-						randf32() * sun_randomness,
-					}, sun_dir));
+						randf32() * ctx->sun.randomness,
+						randf32() * ctx->sun.randomness,
+						randf32() * ctx->sun.randomness,
+					}, ctx->sun.dir));
 					
 					Ray_Result rr = Ray_IntersectScene(prim_hitpoint, d, ctx);
 					if(!rr.is_valid_hit) {
-						col = vec3_add(col, vec3_mul_f(sun_add_col, sun_str));
+						radiance = vec3_add(radiance, vec3_mul_f(ctx->sun.add_col, sun_str));
 					}
 				}
+				*/
+				
+				col = vec3_mul(col, radiance);
+				col = radiance;
 			} else {
 				col = Ray_CalcSkyColor(rd);
 			}
@@ -370,6 +415,11 @@ int main() {
 	ctx.fov_rad = f32_to_deg(ctx.fov);
 	ctx.out_image_data = (rgb8*)malloc(ctx.resolution_x * ctx.resolution_y * sizeof(rgb8));
 	
+	ctx.sun.dir = vec3_normalize((vec3){-0.5, .5, -0.9});
+	ctx.sun.randomness = 0.08f;
+	ctx.sun.col = (vec3){.4,.4,.1};
+	ctx.sun.sample_num = 8;
+	ctx.sun.add_col = vec3_div_f(ctx.sun.col, ctx.sun.sample_num);
 	
 	// init scene
 	{
