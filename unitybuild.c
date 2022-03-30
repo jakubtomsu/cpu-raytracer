@@ -6,4 +6,5 @@
 #include "stb_image_write.h"
 
 #define SCHED_IMPLEMENTATION
+#define SCHED_STATIC
 #include "sched.h"

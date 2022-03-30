@@ -1,10 +1,12 @@
 #include "stb_image.h"
 #include "stb_image_write.h"
+#include "sched.h"
 #include "mathlib.h"
 #include <stdio.h>
 #include <stdint.h>
 #include <intrin.h>
 #include <time.h>
+#include <assert.h>
 
 // some shape intersectors are from: https://www.iquilezles.org/www/articles/intersectors/intersectors.htm
 
@@ -42,6 +44,9 @@ typedef struct RT_Context {
 	} debug;
 } RT_Context;
 
+#define RT_TASKS_ENABLED 1
+#define RT_TASK_X 32
+#define RT_TASK_Y 32
 
 
 static inline size_t map_2d_index_to_1d(const int x, const int y, RT_Context* ctx) {
@@ -347,12 +352,12 @@ void RaytraceRecursive(vec3 ro, vec3 rd, const int max_bounces, RT_Context* ctx,
 	*out_radiance = radiance;
 }
 
-void RenderScene(RT_Context* ctx) {
+void RenderScene(RT_Context* ctx, const int x0, const int x1, const int y0, const int y1) {
 	const vec3 pos = (vec3){0.0, 0, -2};
 	const vec3 ro = pos;
 
-	for(int x = 0; x < ctx->resolution_x; x++) {
-		for(int y = 0; y < ctx->resolution_y; y++) {
+	for(int x = x0; x < x1; x++) {
+		for(int y = y0; y < y1; y++) {
 			vec2 uv = (vec2){
 				(float)x / (float)ctx->resolution_x,
 				(float)y / (float)ctx->resolution_y,
@@ -402,12 +407,37 @@ void RenderScene(RT_Context* ctx) {
 				f32_pow(col.b, 0.4545),
 			};
 			
-			ctx->out_image_data[index] = (rgb8){(uint8_t)(uv.u*255.0f), (uint8_t)(uv.v*255.0f), 0}; // draw UV
-			ctx->out_image_data[index] = vec3_to_rgb8(dir_to_color(rd));
+			//ctx->out_image_data[index] = (rgb8){(uint8_t)(uv.u*255.0f), (uint8_t)(uv.v*255.0f), 0}; // draw UV
+			//ctx->out_image_data[index] = vec3_to_rgb8(dir_to_color(rd));
 			ctx->out_image_data[index] = vec3_to_rgb8(col);
 		}
 	}
 }
+
+typedef struct RT_ParallelTaskParams {
+	RT_Context* ctx;
+	int x0;
+	int x1;
+	int y0;
+	int y1;
+} RT_ParallelTaskParams;
+
+static void RT_sched_ParallelTask(void* pArg, struct scheduler* sched, struct sched_task_partition* p, sched_uint thread_num) {
+	RT_ParallelTaskParams* params = (RT_ParallelTaskParams*)pArg;
+	
+	printf("task thread %i\n", thread_num);
+	printf("ctx 0x%x x0 %i x1 %i\n", params->ctx, params->x0, params->x1);
+	//return;
+	
+	for(int x = params->x0; x < params->x1; x++) {
+		for(int y = params->y0; y < params->y1; y++) {
+			const size_t index = map_2d_index_to_1d(x, y, params->ctx);
+			//ctx->out_image_data[index] = vec3_to_rgb8(vec3_hsv_to_rgb((vec3){(float)thread_num, 1, 1}));
+			params->ctx->out_image_data[index] = vec3_to_rgb8((vec3){1, 0, 1});
+		}
+	}
+}
+
 
 #define TIMED_BLOCK(name, ...) { \
     const clock_t _timed_block_begin_##name = clock(); \
@@ -419,8 +449,8 @@ void RenderScene(RT_Context* ctx) {
 int main() {
 	RT_Context ctx = {0};
 	
-	ctx.resolution_x = 720;
-	ctx.resolution_y = 480;
+	ctx.resolution_x = RT_TASK_X*30;
+	ctx.resolution_y = RT_TASK_Y*15;
 	ctx.fov = 80.0f;
 	
 	ctx.aspect_y = (float)ctx.resolution_y / (float)ctx.resolution_x;
@@ -465,7 +495,48 @@ int main() {
 	
 	printf("start raytrace...\n");
 	TIMED_BLOCK(raytrace,
-	RenderScene(&ctx);
+		if(0) {
+			RenderScene(&ctx, 0, ctx.resolution_x, 0, ctx.resolution_y);
+		} else {
+			assert(ctx.resolution_x % RT_TASK_X == 0);
+			assert(ctx.resolution_y % RT_TASK_Y == 0);
+			
+			void* memory;
+			sched_size needed_memory;
+			struct scheduler sched;
+			scheduler_init(&sched, &needed_memory, SCHED_DEFAULT, 0);
+			memory = calloc(needed_memory, 1);
+			scheduler_start(&sched, memory);
+			
+			printf("init successful\n");
+			
+			{
+				const int xe = ctx.resolution_x % RT_TASK_X;
+				const int ye = ctx.resolution_y % RT_TASK_Y;
+
+				struct sched_task sched_tasks[RT_TASK_X][RT_TASK_Y]; // !!!!!!!
+				RT_ParallelTaskParams task_params[RT_TASK_X][RT_TASK_Y];
+
+				for(int x = 0; x < xe; x++) {
+					for(int y = 0; y < ye; y++) {
+						task_params[x][y].ctx = &ctx;
+						task_params[x][y].x0 = x*RT_TASK_X;
+						task_params[x][y].x1 = (x+1)*RT_TASK_X;
+						task_params[x][y].y0 = y*RT_TASK_Y;
+						task_params[x][y].y1 = (y+1)*RT_TASK_Y;
+						
+						printf("scheduling task %i %i\n", x, y);
+						
+						scheduler_add(&sched, &sched_tasks[x][y], RT_sched_ParallelTask, &task_params[x][y], 1, 1);
+					}
+				}
+				
+				scheduler_wait(&sched);
+			}
+			
+			scheduler_stop(&sched, 1);
+			free(memory);
+		}
 	);
 	
 	printf("total scene raycasts = %lli\n", ctx.debug.total_scene_raycasts);
