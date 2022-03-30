@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <intrin.h>
+#include <time.h>
 
 // some shape intersectors are from: https://www.iquilezles.org/www/articles/intersectors/intersectors.htm
 
@@ -34,6 +35,11 @@ typedef struct RT_Context {
 		int	sample_num;
 		vec3	add_col;
 	} sun;
+	
+	struct {
+		size_t total_scene_raycasts;
+		size_t total_shape_intersection_tests;
+	} debug;
 } RT_Context;
 
 
@@ -44,7 +50,7 @@ static inline size_t map_2d_index_to_1d(const int x, const int y, RT_Context* ct
 
 static inline vec3 ray_pinhole_projection(vec2 uv, const RT_Context* ctx) {
 	uv = vec2_mul_f(vec2_sub(uv, (vec2){0.5f, 0.5f}), 2.0f);
-	const float fov_tan = f32_tan(ctx->fov_rad * 0.5f);
+	const float fov_tan = f32_tan(ctx->fov_rad*0.5f);
 	return vec3_normalize((vec3){uv.x * fov_tan / ctx->aspect_y, uv.y * fov_tan, 1.0f});
 }
 
@@ -257,6 +263,9 @@ Ray_Result Ray_IntersectScene(const vec3 ro, const vec3 rd, RT_Context* ctx) {
 			result.col = shape.col;
 		}
 	}
+	
+	ctx->debug.total_scene_raycasts++;
+	ctx->debug.total_shape_intersection_tests += SceneShapes_num;
 
 	return result;
 }
@@ -289,36 +298,43 @@ vec3 RandSphereDir() {
 }
 
 vec3 RandHemisphereDir(const vec3 normal) {
-	vec3 d = RandSphereDir();
-	if(vec3_dot(d, normal) < 0.0f) d = vec3_negate(d);
+	vec3 d = {0};
+	if(1) {
+		d = vec3_normalize(vec3_add(RandSphereDir(), vec3_mul_f(normal, 1.0f+1e-6f)));
+	} else {
+		d = RandSphereDir();
+		if(vec3_dot(d, normal) < 0.0f) d = vec3_negate(d);
+	}
 	return d;
 }
 
 // @returns: color
-vec3 RaytraceShadowRay(vec3 p, RT_Context* ctx) {
-	vec3 d = vec3_normalize(vec3_add(vec3_mul_f(RandSphereDir(), ctx->sun.randomness), ctx->sun.dir));
+vec3 RaytraceShadowRay(const vec3 p, const vec3 n, RT_Context* ctx) {
+	const vec3 d = vec3_normalize(vec3_add(vec3_mul_f(RandSphereDir(), ctx->sun.randomness), ctx->sun.dir));
 	Ray_Result rr = Ray_IntersectScene(p, d, ctx);
-	vec3 radiance = vec3_init_f(0.1);
+	vec3 radiance = vec3_init_f(0.0);
 	if(!rr.is_valid_hit) {
-		radiance = vec3_add(radiance, ctx->sun.add_col);
+		radiance = vec3_add(radiance, vec3_mul_f(ctx->sun.add_col, vec3_dot(n, d)));
 	}
 	return radiance;
 }
 
 // @returns: color
-vec3 RaytraceRecursive(vec3 ro, vec3 rd, const int max_bounces, RT_Context* ctx) {
+void RaytraceRecursive(vec3 ro, vec3 rd, const int max_bounces, RT_Context* ctx, vec3* out_col, vec3* out_radiance) {
 	vec3 col = {0};
-	float accum = 0;
+	vec3 radiance = {0};
+	int accum = 0;
 	for(int i = 0; i < max_bounces; i++) {
 		const float strength = 1.0f / (float)(i+1);
 		Ray_Result rr = Ray_IntersectScene(ro, rd, ctx);
 		accum += strength;
 		if(rr.is_valid_hit) {
 			ro = vec3_add(vec3_mul_f(rd, rr.t), vec3_mul_f(rr.normal, 1e-6f));
-			vec3 radiance = RaytraceShadowRay(ro, ctx);
+			vec3 radi = vec3_mul_f(RaytraceShadowRay(ro, rr.normal, ctx), -vec3_dot(rd, rr.normal));
 			
 			rd = RandHemisphereDir(rr.normal);
-			col = vec3_add(col, vec3_mul_f(vec3_mul(rr.col, radiance), strength));
+			col = vec3_add(col, vec3_mul_f(rr.col, strength));
+			radiance = vec3_add(radiance, vec3_mul_f(radi, strength));
 		} else {
 			col = vec3_add(col, vec3_mul_f(Ray_CalcSkyColor(rd), strength));
 			goto loop_end;
@@ -327,11 +343,12 @@ vec3 RaytraceRecursive(vec3 ro, vec3 rd, const int max_bounces, RT_Context* ctx)
 	loop_end:
 	
 	col = vec3_div_f(col, accum);
-	return col;
+	*out_col = col;
+	*out_radiance = radiance;
 }
 
 void RenderScene(RT_Context* ctx) {
-	const vec3 pos = (vec3){0.5, 0, -2};
+	const vec3 pos = (vec3){0.0, 0, -2};
 	const vec3 ro = pos;
 
 	for(int x = 0; x < ctx->resolution_x; x++) {
@@ -349,42 +366,30 @@ void RenderScene(RT_Context* ctx) {
 			vec3 col = {0};
 			Ray_Result prim = Ray_IntersectScene(ro, rd, ctx);
 			if(prim.is_valid_hit) {
-				const int gi_num = 1;
+				const int gi_num = 10;
 				const vec3 prim_hitpoint = vec3_add(vec3_add(ro, vec3_mul_f(rd, prim.t)), vec3_mul_f(prim.normal, 1e-7f));
 				col = prim.col;
 
-				
 				vec3 radiance = {0};
-				
+
 				// GI
-				vec3 gi_finalcol = {0};
 				for(int i = 0; i < gi_num; i++) {
 					vec3 d = RandHemisphereDir(prim.normal);
-					gi_finalcol = RaytraceRecursive(ro, d, 1, ctx);
+					vec3 c = {0};
+					vec3 r = {0};
+					RaytraceRecursive(prim_hitpoint, d, 2, ctx, &c, &r);
+					col      = vec3_add(col,      vec3_div_f(c, gi_num));
+					radiance = vec3_add(radiance, vec3_div_f(r, gi_num));
 				}
-				gi_finalcol = vec3_div_f(gi_finalcol, gi_num);
-				radiance = vec3_add(radiance, gi_finalcol);
-				//col = gi_finalcol;
+				col = vec3_mul_f(col, 0.5f);
 
 				// sun light
-				/*
-				const float sun_str = vec3_dot(prim.normal, ctx->sun.dir);
 				for(int i = 0; i < ctx->sun.sample_num; i++) {
-					vec3 d = vec3_normalize(vec3_add((vec3){
-						randf32() * ctx->sun.randomness,
-						randf32() * ctx->sun.randomness,
-						randf32() * ctx->sun.randomness,
-					}, ctx->sun.dir));
-					
-					Ray_Result rr = Ray_IntersectScene(prim_hitpoint, d, ctx);
-					if(!rr.is_valid_hit) {
-						radiance = vec3_add(radiance, vec3_mul_f(ctx->sun.add_col, sun_str));
-					}
+					radiance = vec3_add(radiance, RaytraceShadowRay(prim_hitpoint, prim.normal, ctx));
 				}
-				*/
 				
 				col = vec3_mul(col, radiance);
-				col = radiance;
+				//col = radiance;
 			} else {
 				col = Ray_CalcSkyColor(rd);
 			}
@@ -404,22 +409,33 @@ void RenderScene(RT_Context* ctx) {
 	}
 }
 
+#define TIMED_BLOCK(name, ...) { \
+    const clock_t _timed_block_begin_##name = clock(); \
+    __VA_ARGS__ \
+    printf(#name " time = %f ms\n", \
+        (double)(clock()-_timed_block_begin_##name)*1000.0/CLOCKS_PER_SEC); \
+}
+
 int main() {
 	RT_Context ctx = {0};
 	
 	ctx.resolution_x = 720;
 	ctx.resolution_y = 480;
-	ctx.fov = 180.0f;
+	ctx.fov = 80.0f;
 	
 	ctx.aspect_y = (float)ctx.resolution_y / (float)ctx.resolution_x;
-	ctx.fov_rad = f32_to_deg(ctx.fov);
+	ctx.fov_rad = f32_to_rad(ctx.fov);
 	ctx.out_image_data = (rgb8*)malloc(ctx.resolution_x * ctx.resolution_y * sizeof(rgb8));
 	
-	ctx.sun.dir = vec3_normalize((vec3){-0.5, .5, -0.9});
-	ctx.sun.randomness = 0.08f;
+	ctx.sun.dir = vec3_normalize((vec3){-0.6, .4, -0.9});
+	ctx.sun.randomness = 0.04f;
 	ctx.sun.col = (vec3){.4,.4,.1};
-	ctx.sun.sample_num = 8;
+	ctx.sun.sample_num = 4;
 	ctx.sun.add_col = vec3_div_f(ctx.sun.col, ctx.sun.sample_num);
+
+	{
+		srand(time(NULL)<<1);
+	}
 	
 	// init scene
 	{
@@ -446,7 +462,15 @@ int main() {
 		SceneShapes_num = 6;
 	}
 	
+	
+	printf("start raytrace...\n");
+	TIMED_BLOCK(raytrace,
 	RenderScene(&ctx);
+	);
+	
+	printf("total scene raycasts = %lli\n", ctx.debug.total_scene_raycasts);
+	printf("total shape intersection tests = %lli\n", ctx.debug.total_shape_intersection_tests);
+	
 	
 	stbi_write_png("image.png", ctx.resolution_x, ctx.resolution_y, 3, ctx.out_image_data, sizeof(rgb8)*ctx.resolution_x);
 	return 0;
