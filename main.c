@@ -45,8 +45,13 @@ typedef struct RT_Context {
 } RT_Context;
 
 #define RT_TASKS_ENABLED 1
-#define RT_TASK_X 32
-#define RT_TASK_Y 32
+#define RT_TASK_PIXELS_X 64
+#define RT_TASK_PIXELS_Y 64
+#define RT_TASK_NUM_X 32
+#define RT_TASK_NUM_Y 18
+
+#define RT_RESOLUTION_X (RT_TASK_PIXELS_X * RT_TASK_NUM_X)
+#define RT_RESOLUTION_Y (RT_TASK_PIXELS_Y * RT_TASK_NUM_Y)
 
 
 static inline size_t map_2d_index_to_1d(const int x, const int y, RT_Context* ctx) {
@@ -120,6 +125,7 @@ static inline vec2 Ray_IntersectBox(const vec3 ro, const vec3 rd, const vec3 box
 	return (vec2){tN, tF};
 }
 
+// FIXME
 static inline float Ray_GoursatIntersect(const vec3 ro, const vec3 rd, float ka, float kb) {
 	float po = 1.0;
 	vec3 rd2 = vec3_mul(rd, rd); vec3 rd3 = vec3_mul(rd2, rd);
@@ -227,25 +233,6 @@ static inline vec3 Ray_CalcSkyColor(const vec3 d) {
 Ray_Result Ray_IntersectScene(const vec3 ro, const vec3 rd, RT_Context* ctx) {
 	Ray_Result result = {0};
 	result.t = 1e10f;
-
-	/*
-	vec2 nf = {0};
-	float t = 0;
-	const vec3 center = (vec3){-1, 1, -4000};
-	// const vec2 nf = Ray_IntersectSphere(ro, rd, (vec3){0, 0, 10}, 4.0f);
-	nf = Ray_IntersectBox(vec3_sub(ro, (vec3){-1, -1.5, 3}), rd, (vec3){3, 1, 2}, &result.normal);
-	//t = Ray_GoursatIntersect(vec3_sub(ro, center), rd, 1.0f, 1.0f);
-	//const vec3 hitpos = vec3_add(ro, vec3_mul_f(rd, t));
-	//result.normal = Ray_GousatNormal(hitpos, 1.0f, 1.0f);
-	
-
-	if(NearFar_Hit(nf)) { t = nf.x;
-	//if(t > 0) {
-		result.is_valid_hit = 1;
-		result.t = t;
-		result.col = vec3_init_f(t * 0.02f);
-	}
-	*/
 	
 	for(int i = 0; i < SceneShapes_num; i++) {
 		vec2 nf;
@@ -425,17 +412,19 @@ typedef struct RT_ParallelTaskParams {
 static void RT_sched_ParallelTask(void* pArg, struct scheduler* sched, struct sched_task_partition* p, sched_uint thread_num) {
 	RT_ParallelTaskParams* params = (RT_ParallelTaskParams*)pArg;
 	
-	printf("task thread %i\n", thread_num);
-	printf("ctx 0x%x x0 %i x1 %i\n", params->ctx, params->x0, params->x1);
+	//printf("task thread %i\n", thread_num);
+	//printf("x %i %i y %i %i\n", params->x0, params->x1, params->y0, params->y1);
 	//return;
 	
-	for(int x = params->x0; x < params->x1; x++) {
-		for(int y = params->y0; y < params->y1; y++) {
-			const size_t index = map_2d_index_to_1d(x, y, params->ctx);
-			//ctx->out_image_data[index] = vec3_to_rgb8(vec3_hsv_to_rgb((vec3){(float)thread_num, 1, 1}));
-			params->ctx->out_image_data[index] = vec3_to_rgb8((vec3){1, 0, 1});
-		}
-	}
+	RenderScene(params->ctx, params->x0, params->x1, params->y0, params->y1);
+
+	//for(int x = params->x0; x < params->x1; x++) {
+	//	for(int y = params->y0; y < params->y1; y++) {
+	//		const size_t index = map_2d_index_to_1d(x, y, params->ctx);
+	//		//params->ctx->out_image_data[index] = vec3_to_rgb8(vec3_hsv_to_rgb((vec3){((float)thread_num)*0.1f, 1, 1}));
+	//		params->ctx->out_image_data[index] = vec3_to_rgb8((vec3){1, 0, 1});
+	//	}
+	//}
 }
 
 
@@ -449,13 +438,12 @@ static void RT_sched_ParallelTask(void* pArg, struct scheduler* sched, struct sc
 int main() {
 	RT_Context ctx = {0};
 	
-	ctx.resolution_x = RT_TASK_X*30;
-	ctx.resolution_y = RT_TASK_Y*15;
 	ctx.fov = 80.0f;
-	
-	ctx.aspect_y = (float)ctx.resolution_y / (float)ctx.resolution_x;
+	ctx.resolution_x = RT_RESOLUTION_X;
+	ctx.resolution_y = RT_RESOLUTION_Y;
+	ctx.aspect_y = (float)RT_RESOLUTION_Y / (float)RT_RESOLUTION_X;
 	ctx.fov_rad = f32_to_rad(ctx.fov);
-	ctx.out_image_data = (rgb8*)malloc(ctx.resolution_x * ctx.resolution_y * sizeof(rgb8));
+	ctx.out_image_data = (rgb8*)malloc(RT_RESOLUTION_X * RT_RESOLUTION_Y * sizeof(rgb8));
 	
 	ctx.sun.dir = vec3_normalize((vec3){-0.6, .4, -0.9});
 	ctx.sun.randomness = 0.04f;
@@ -463,10 +451,9 @@ int main() {
 	ctx.sun.sample_num = 4;
 	ctx.sun.add_col = vec3_div_f(ctx.sun.col, ctx.sun.sample_num);
 
-	{
-		srand(time(NULL)<<1);
-	}
-	
+	// set rand() seed
+	srand(time(NULL)<<1);
+
 	// init scene
 	{
 		SceneShapes[0].kind = RT_SHAPEKIND_BOX;
@@ -493,44 +480,39 @@ int main() {
 	}
 	
 	
-	printf("start raytrace...\n");
+	printf("resolution = %ix%i  task_num=%i\n", RT_RESOLUTION_X, RT_RESOLUTION_Y, RT_TASK_NUM_X*RT_TASK_NUM_Y);
+
 	TIMED_BLOCK(raytrace,
 		if(0) {
-			RenderScene(&ctx, 0, ctx.resolution_x, 0, ctx.resolution_y);
+			RenderScene(&ctx, 0, RT_RESOLUTION_X, 0, RT_RESOLUTION_Y);
 		} else {
-			assert(ctx.resolution_x % RT_TASK_X == 0);
-			assert(ctx.resolution_y % RT_TASK_Y == 0);
-			
 			void* memory;
 			sched_size needed_memory;
 			struct scheduler sched;
 			scheduler_init(&sched, &needed_memory, SCHED_DEFAULT, 0);
+			printf("scheduler memory = %i b\n", needed_memory);
 			memory = calloc(needed_memory, 1);
 			scheduler_start(&sched, memory);
 			
-			printf("init successful\n");
 			
 			{
-				const int xe = ctx.resolution_x % RT_TASK_X;
-				const int ye = ctx.resolution_y % RT_TASK_Y;
+				struct sched_task sched_tasks[RT_TASK_NUM_X][RT_TASK_NUM_Y]; // !!!!!!!
+				RT_ParallelTaskParams task_params[RT_TASK_NUM_X][RT_TASK_NUM_Y];
 
-				struct sched_task sched_tasks[RT_TASK_X][RT_TASK_Y]; // !!!!!!!
-				RT_ParallelTaskParams task_params[RT_TASK_X][RT_TASK_Y];
-
-				for(int x = 0; x < xe; x++) {
-					for(int y = 0; y < ye; y++) {
+				for(int x = 0; x < RT_TASK_NUM_X; x++) {
+					for(int y = 0; y < RT_TASK_NUM_Y; y++) {
 						task_params[x][y].ctx = &ctx;
-						task_params[x][y].x0 = x*RT_TASK_X;
-						task_params[x][y].x1 = (x+1)*RT_TASK_X;
-						task_params[x][y].y0 = y*RT_TASK_Y;
-						task_params[x][y].y1 = (y+1)*RT_TASK_Y;
+						task_params[x][y].x0 = x    *RT_TASK_PIXELS_X;
+						task_params[x][y].x1 = (x+1)*RT_TASK_PIXELS_X;
+						task_params[x][y].y0 = y    *RT_TASK_PIXELS_Y;
+						task_params[x][y].y1 = (y+1)*RT_TASK_PIXELS_Y;
 						
-						printf("scheduling task %i %i\n", x, y);
+						//printf("scheduling task %i %i\n", x, y);
 						
 						scheduler_add(&sched, &sched_tasks[x][y], RT_sched_ParallelTask, &task_params[x][y], 1, 1);
 					}
 				}
-				
+
 				scheduler_wait(&sched);
 			}
 			
@@ -543,6 +525,6 @@ int main() {
 	printf("total shape intersection tests = %lli\n", ctx.debug.total_shape_intersection_tests);
 	
 	
-	stbi_write_png("image.png", ctx.resolution_x, ctx.resolution_y, 3, ctx.out_image_data, sizeof(rgb8)*ctx.resolution_x);
+	stbi_write_png("image.png", RT_RESOLUTION_X, RT_RESOLUTION_Y, 3, ctx.out_image_data, sizeof(rgb8)*RT_RESOLUTION_X);
 	return 0;
 }
